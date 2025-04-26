@@ -1,0 +1,41 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+# 读取图像
+image_path = 'img.jpg'  # 替换为你的图像文件路径
+image = cv2.imread(image_path)
+image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+# 1. 翻转图像
+flipped_horizontal = cv2.flip(image_rgb, 1)  # 水平翻转
+flipped_vertical = cv2.flip(image_rgb, 0)  # 垂直翻转
+# 2. 旋转图像
+rows, cols, _ = image_rgb.shape
+M = cv2.getRotationMatrix2D((cols/2, rows/2), 45, 1)  # 旋转 45 度
+rotated = cv2.warpAffine(image_rgb, M, (cols, rows))
+# 3. 添加噪声
+noise = np.random.normal(0, 20, image_rgb.shape).astype(np.uint8)
+noisy_image = cv2.add(image_rgb, noise)
+# 4. 增强对比度
+alpha = 1.5  # 对比度增强因子
+beta = 0  # 亮度调整值
+contrasted_image = cv2.convertScaleAbs(image_rgb, alpha=alpha, beta=beta)
+
+# 可视化处理后的图像
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+axes[0, 0].imshow(image_rgb)
+axes[0, 0].set_title('Original Image')
+axes[0, 1].imshow(flipped_horizontal)
+axes[0, 1].set_title('Horizontally Flipped')
+axes[0, 2].imshow(flipped_vertical)
+axes[0, 2].set_title('Vertically Flipped')
+axes[1, 0].imshow(rotated)
+axes[1, 0].set_title('Rotated 45 Degrees')
+axes[1, 1].imshow(noisy_image)
+axes[1, 1].set_title('Noisy Image')
+axes[1, 2].imshow(contrasted_image)
+axes[1, 2].set_title('Contrast Enhanced')
+
+for ax in axes.flat:
+    ax.axis('off')
+
+plt.show()
