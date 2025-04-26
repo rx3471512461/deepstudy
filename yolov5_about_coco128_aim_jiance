@@ -1,0 +1,11 @@
+import os
+
+def train_yolov5():
+    # 进入 yolov5 文件夹
+    os.chdir('D:/python_project/deepstudy/yolov5-master')
+
+    # 训练模型：调整图像大小、批次大小、训练轮数、数据集路径、预训练权重
+    # 使用 TensorBoard 参数来自动记录训练日志
+    os.system('python train.py --img 640 --batch 16 --epochs 100 --data coco128.yaml --weights yolov5s.pt --cache --project runs/train --name exp3')
+# 调用训练函数
+train_yolov5()
