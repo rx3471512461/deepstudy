@@ -1,0 +1,364 @@
+#train.py
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import transforms
+import matplotlib.pyplot as plt
+import os
+
+from exam3.UNet import UNet
+from exam3.coco_dataset import COCOSegmentationDataset
+
+# 图像预处理
+img_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+# 掩码预处理（不归一化，只转换为 tensor）
+mask_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.PILToTensor()
+])
+
+# 使用 dog 类别 (category_id = 18)
+filter_categories = [18]
+print("加载数据集中...")
+
+train_dataset = COCOSegmentationDataset(
+    img_dir="D:/python_project/deepstudy/dataset/colo/images/train2017",
+    ann_file="D:/python_project/deepstudy/dataset/colo/annotations/instances_train2017.json",
+    transform_image=img_transform,
+    transform_mask=mask_transform,
+    filter_category_ids=filter_categories,
+    max_images=1000
+)
+
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+
+# 模型：2类（二分类）
+num_classes = 2
+model = UNet(in_channels=3, out_channels=num_classes)
+
+# 损失函数 & 优化器
+criterion = torch.nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
+
+# 训练
+epochs = 2
+epoch_losses = []
+
+print("准备开始训练")
+
+for epoch in range(epochs):
+    model.train()
+    running_loss = 0.0
+
+    for batch_idx, (images, masks) in enumerate(train_loader):
+        print(f"第 {batch_idx} 个 batch")
+
+        optimizer.zero_grad()
+        outputs = model(images)
+
+        # 处理 mask
+        if masks.dim() == 4:
+            masks = torch.squeeze(masks, 1)
+        masks = masks.long()
+
+        loss = criterion(outputs, masks)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+    avg_loss = running_loss / len(train_loader)
+    print(f"Epoch [{epoch + 1}/{epochs}], Loss: {avg_loss:.4f}")
+    epoch_losses.append(avg_loss)
+
+    # 保存损失图
+    os.makedirs("outputs", exist_ok=True)
+    plt.plot(range(1, epoch + 2), epoch_losses)
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training Loss')
+    plt.savefig(f'outputs/loss_epoch_{epoch + 1}.png')
+    plt.close()
+
+
+#val.py
+import os
+import torch
+import numpy as np
+from torchvision import transforms
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import average_precision_score
+from PIL import Image
+from exam3.UNet import UNet
+from exam3.coco_dataset import COCOSegmentationDataset
+
+# 设备
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 模型参数
+num_classes = 2
+model = UNet(in_channels=3, out_channels=num_classes)
+model.load_state_dict(torch.load("outputs/unet_dog.pth", map_location=device))
+model.to(device)
+model.eval()
+
+# 变换（和训练保持一致）
+img_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+mask_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.PILToTensor()
+])
+
+# 验证集加载（路径请修改为你的 val2017）
+val_dataset = COCOSegmentationDataset(
+    img_dir="D:/python_project/deepstudy/dataset/colo/images/val2017",
+    ann_file="D:/python_project/deepstudy/dataset/colo/annotations/instances_val2017.json",
+    transform_image=img_transform,
+    transform_mask=mask_transform,
+    filter_category_ids=[18],  # 只检测 dog 类别
+    max_images=20
+)
+
+# 保存路径
+os.makedirs("outputs/predictions", exist_ok=True)
+
+# 准备保存数据来计算 Precision-Recall
+y_true = []
+y_scores = []
+
+# 预测并可视化前 5 张图
+for idx in range(5):
+    image, mask = val_dataset[idx]
+    image = image.unsqueeze(0).to(device)
+    mask = mask.cpu().numpy()
+
+    with torch.no_grad():
+        output = model(image)
+        pred = torch.argmax(torch.softmax(output, dim=1), dim=1).squeeze().cpu().numpy()
+
+    # 可视化拼接
+    image_vis = val_dataset[idx][0].cpu().numpy().transpose(1, 2, 0)
+    image_vis = (image_vis * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406])  # 反归一化
+    image_vis = (image_vis * 255).astype(np.uint8)
+
+    mask_color = (mask * 255).astype(np.uint8)
+    pred_color = (pred * 255).astype(np.uint8)
+
+    # 拼接显示
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    axes[0].imshow(image_vis)
+    axes[0].set_title("Original Image")
+    axes[1].imshow(mask_color, cmap='gray')
+    axes[1].set_title("Ground Truth")
+    axes[2].imshow(pred_color, cmap='gray')
+    axes[2].set_title("Prediction")
+    for ax in axes:
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.savefig(f"outputs/predictions/pred_{idx+1}.png")
+    plt.close()
+
+    # 计算 precision 和 recall
+    # 扁平化图像和掩码
+    mask_flat = mask.flatten()
+    pred_flat = pred.flatten()
+
+    # 计算每个图像的精度和召回率
+    precision, recall, _ = precision_recall_curve(mask_flat, pred_flat)
+    avg_precision = average_precision_score(mask_flat, pred_flat)
+
+    # 存储真实标签和预测得分（用于绘制曲线）
+    y_true.extend(mask_flat)
+    y_scores.extend(pred_flat)
+
+# 绘制精度-召回率曲线
+precision, recall, _ = precision_recall_curve(y_true, y_scores)
+avg_precision = average_precision_score(y_true, y_scores)
+
+plt.figure(figsize=(8, 6))
+plt.plot(recall, precision, color='b', label=f'Average Precision: {avg_precision:.2f}')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title('Precision-Recall Curve')
+plt.legend(loc='lower left')
+plt.grid(True)
+plt.savefig("outputs/precision_recall_plot.png")
+plt.close()
+
+print("验证图像已保存至 outputs/predictions")
+print(f"精度-召回率曲线已保存至 outputs/precision_recall_plot.png")
+
+
+
+#UNet.py
+import torch
+import torch.nn as nn
+
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=2):
+        super(UNet, self).__init__()
+
+        def conv_block(in_ch, out_ch):
+            return nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True)
+            )
+
+        self.down1 = conv_block(in_channels, 64)
+        self.pool1 = nn.MaxPool2d(2)
+
+        self.down2 = conv_block(64, 128)
+        self.pool2 = nn.MaxPool2d(2)
+
+        self.down3 = conv_block(128, 256)
+        self.pool3 = nn.MaxPool2d(2)
+
+        self.down4 = conv_block(256, 512)
+        self.pool4 = nn.MaxPool2d(2)
+
+        self.middle = nn.Sequential(
+            conv_block(512, 1024),
+            nn.Dropout(0.5)
+        )
+
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.up_block4 = conv_block(1024, 512)
+
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.up_block3 = conv_block(512, 256)
+
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.up_block2 = conv_block(256, 128)
+
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up_block1 = conv_block(128, 64)
+
+        self.out_conv = nn.Conv2d(64, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        c1 = self.down1(x)
+        p1 = self.pool1(c1)
+
+        c2 = self.down2(p1)
+        p2 = self.pool2(c2)
+
+        c3 = self.down3(p2)
+        p3 = self.pool3(c3)
+
+        c4 = self.down4(p3)
+        p4 = self.pool4(c4)
+
+        c5 = self.middle(p4)
+
+        u4 = self.up4(c5)
+        u4 = torch.cat([u4, c4], dim=1)
+        u4 = self.up_block4(u4)
+
+        u3 = self.up3(u4)
+        u3 = torch.cat([u3, c3], dim=1)
+        u3 = self.up_block3(u3)
+
+        u2 = self.up2(u3)
+        u2 = torch.cat([u2, c2], dim=1)
+        u2 = self.up_block2(u2)
+
+        u1 = self.up1(u2)
+        u1 = torch.cat([u1, c1], dim=1)
+        u1 = self.up_block1(u1)
+
+        out = self.out_conv(u1)
+        return out
+
+
+
+
+#coco_dataset.py
+import os
+import numpy as np
+from PIL import Image
+from pycocotools.coco import COCO
+import torch
+from torch.utils.data import Dataset
+from pycocotools import mask as maskUtils
+
+
+class COCOSegmentationDataset(Dataset):
+    def __init__(self, img_dir, ann_file, transform_image=None, transform_mask=None, filter_category_ids=None, max_images=5000):
+        self.img_dir = img_dir
+        self.coco = COCO(ann_file)
+        self.transform_image = transform_image
+        self.transform_mask = transform_mask
+
+        if filter_category_ids is None or len(filter_category_ids) != 1:
+            raise ValueError("请指定一个目标类别ID，如 filter_category_ids=[18] 表示 dog")
+        self.target_category_id = filter_category_ids[0]
+
+        # 筛选包含目标类别的图像
+        all_img_ids = list(self.coco.imgs.keys())
+        filtered_ids = []
+
+        for img_id in all_img_ids:
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+
+            if len(anns) == 0:
+                continue
+
+            anns = [ann for ann in anns if ann['category_id'] == self.target_category_id]
+            if not anns:
+                continue
+
+            filtered_ids.append(img_id)
+
+        self.img_ids = sorted(filtered_ids)[:max_images]
+
+    def __len__(self):
+        return len(self.img_ids)
+
+    def __getitem__(self, idx):
+        img_id = self.img_ids[idx]
+        img_info = self.coco.loadImgs(img_id)[0]
+        img_path = os.path.join(self.img_dir, img_info['file_name'])
+
+        image = Image.open(img_path).convert("RGB")
+        ann_ids = self.coco.getAnnIds(imgIds=img_id, catIds=[self.target_category_id])
+        anns = self.coco.loadAnns(ann_ids)
+
+        mask = self._generate_binary_mask(anns, img_info['height'], img_info['width'])
+
+        if self.transform_image:
+            image = self.transform_image(image)
+        if self.transform_mask:
+            mask = Image.fromarray(mask.astype(np.uint8))
+            mask = self.transform_mask(mask)
+            mask = mask.squeeze()
+
+        return image, mask.long()
+
+    def _generate_binary_mask(self, anns, height, width):
+        mask = np.zeros((height, width), dtype=np.uint8)
+        for ann in anns:
+            if ann['category_id'] != self.target_category_id:
+                continue
+            rle = self.coco.annToRLE(ann)
+            rle_mask = maskUtils.decode(rle)
+            mask[rle_mask == 1] = 1  # 目标类设为1，背景为0
+        return mask
